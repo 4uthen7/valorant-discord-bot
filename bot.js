@@ -59,8 +59,8 @@ async function getMatchHistory(name, tag, region = 'ap') {
     }
 }
 
-// 統計情報を計算
-function calculateStats(matches) {
+// 統計情報を計算（修正版：入力されたプレイヤーのデータのみを取得）
+function calculateStats(matches, playerName, playerTag) {
     if (!matches || matches.length === 0) return null;
 
     let totalKills = 0, totalDeaths = 0, totalHS = 0, totalShots = 0;
@@ -69,42 +69,67 @@ function calculateStats(matches) {
     const last5Matches = [];
 
     matches.slice(0, 5).forEach(match => {
+        // プレイヤー本人のデータを探す（名前とタグで完全一致）
         const playerStats = match.players.all_players.find(
-            p => p.name === match.players.red?.[0]?.name || p.name === match.players.blue?.[0]?.name
+            p => p.name.toLowerCase() === playerName.toLowerCase() && 
+                 p.tag.toLowerCase() === playerTag.toLowerCase()
         );
 
-        if (playerStats) {
-            totalKills += playerStats.stats.kills;
-            totalDeaths += playerStats.stats.deaths;
-            totalHS += playerStats.stats.headshots;
-            totalShots += playerStats.stats.bodyshots + playerStats.stats.headshots + playerStats.stats.legshots;
-
-            if (playerStats.team === match.teams.red.has_won ? 'Red' : 'Blue') {
-                wins++;
-            }
-
-            agentCount[playerStats.character] = (agentCount[playerStats.character] || 0) + 1;
-
-            last5Matches.push({
-                map: match.metadata.map,
-                agent: playerStats.character,
-                kills: playerStats.stats.kills,
-                deaths: playerStats.stats.deaths,
-                assists: playerStats.stats.assists,
-                hs: playerStats.stats.headshots,
-                bodyshots: playerStats.stats.bodyshots,
-                legshots: playerStats.stats.legshots,
-                won: playerStats.team === (match.teams.red.has_won ? 'Red' : 'Blue')
-            });
+        // プレイヤーが見つからない場合はスキップ
+        if (!playerStats) {
+            console.log(`プレイヤー ${playerName}#${playerTag} が試合 ${match.metadata.matchid} に見つかりませんでした`);
+            return;
         }
+
+        // 統計を集計
+        totalKills += playerStats.stats.kills;
+        totalDeaths += playerStats.stats.deaths;
+        totalHS += playerStats.stats.headshots;
+        totalShots += playerStats.stats.bodyshots + playerStats.stats.headshots + playerStats.stats.legshots;
+
+        // 勝敗判定（プレイヤーのチームが勝ったかどうか）
+        const playerTeam = playerStats.team.toLowerCase();
+        const redWon = match.teams.red.has_won;
+        const blueWon = match.teams.blue.has_won;
+        
+        const won = (playerTeam === 'red' && redWon) || (playerTeam === 'blue' && blueWon);
+        if (won) {
+            wins++;
+        }
+
+        // エージェント使用回数を集計
+        agentCount[playerStats.character] = (agentCount[playerStats.character] || 0) + 1;
+
+        // HS率計算
+        const totalShotsInMatch = playerStats.stats.headshots + playerStats.stats.bodyshots + playerStats.stats.legshots;
+        const hsRate = totalShotsInMatch > 0 ? (playerStats.stats.headshots / totalShotsInMatch * 100) : 0;
+
+        // 試合詳細を保存
+        last5Matches.push({
+            map: match.metadata.map,
+            agent: playerStats.character,
+            kills: playerStats.stats.kills,
+            deaths: playerStats.stats.deaths,
+            assists: playerStats.stats.assists,
+            hs: playerStats.stats.headshots,
+            bodyshots: playerStats.stats.bodyshots,
+            legshots: playerStats.stats.legshots,
+            hsRate: hsRate,
+            won: won
+        });
     });
+
+    // データが取得できなかった場合
+    if (last5Matches.length === 0) {
+        return null;
+    }
 
     const mostUsedAgent = Object.entries(agentCount).sort((a, b) => b[1] - a[1])[0];
 
     return {
-        avgKD: (totalKills / totalDeaths).toFixed(2),
-        avgHS: ((totalHS / totalShots) * 100).toFixed(1),
-        winRate: ((wins / 5) * 100).toFixed(0),
+        avgKD: totalDeaths > 0 ? (totalKills / totalDeaths).toFixed(2) : totalKills.toFixed(2),
+        avgHS: totalShots > 0 ? ((totalHS / totalShots) * 100).toFixed(1) : '0.0',
+        winRate: ((wins / last5Matches.length) * 100).toFixed(0),
         mostUsedAgent: mostUsedAgent ? mostUsedAgent[0] : 'N/A',
         last5Matches
     };
@@ -155,13 +180,14 @@ function createStatsEmbed(name, tag, mmrData, stats) {
         let matchDetails = '';
         stats.last5Matches.forEach((match, i) => {
             const result = match.won ? '✅ 勝利' : '❌ 敗北';
-            const kd = (match.kills / match.deaths).toFixed(2);
-            const hsRate = ((match.hs / (match.hs + match.bodyshots + match.legshots)) * 100).toFixed(1);
+            const kd = match.deaths > 0 ? (match.kills / match.deaths).toFixed(2) : match.kills.toFixed(2);
             matchDetails += `**${i + 1}.** ${result} | ${match.agent}\n`;
-            matchDetails += `   ${match.kills}/${match.deaths}/${match.assists} | K/D: ${kd} | HS: ${hsRate}%\n`;
+            matchDetails += `   ${match.kills}/${match.deaths}/${match.assists} | K/D: ${kd} | HS: ${match.hsRate.toFixed(1)}%\n`;
         });
 
         embed.addFields({ name: '📋 直近5試合', value: matchDetails || 'データなし', inline: false });
+    } else {
+        embed.addFields({ name: '📋 直近5試合', value: '試合データが見つかりませんでした', inline: false });
     }
 
     return embed;
@@ -180,13 +206,15 @@ client.on('messageCreate', async message => {
     if (message.content.startsWith('!stats')) {
         const args = message.content.split(' ');
         if (args.length < 2) {
-            return message.reply('使用方法: `!stats [名前]#[タグ]`\n例: `!stats Faker#0001`');
+            return message.reply('使用方法: `!stats [名前]#[タグ]`\n例: `!stats TenZ#0915`');
         }
 
-        const [name, tag] = args[1].split('#');
-        if (!name || !tag) {
+        const playerIdParts = args[1].split('#');
+        if (playerIdParts.length !== 2) {
             return message.reply('❌ 正しい形式で入力してください: `名前#タグ`');
         }
+
+        const [name, tag] = playerIdParts;
 
         const loadingMsg = await message.reply('🔍 プレイヤー情報を取得中...');
 
@@ -196,7 +224,7 @@ client.on('messageCreate', async message => {
                 getMatchHistory(name, tag)
             ]);
 
-            const stats = matchData ? calculateStats(matchData.data) : null;
+            const stats = matchData && matchData.data ? calculateStats(matchData.data, name, tag) : null;
             const embed = createStatsEmbed(name, tag, mmrData, stats);
 
             await loadingMsg.edit({ content: null, embeds: [embed] });

@@ -1,0 +1,19 @@
+{
+  "name": "valorant-discord-bot",
+  "version": "1.0.0",
+  "description": "Valorant stats tracker bot for Discord",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": ["discord", "valorant", "bot"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "axios": "^1.6.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

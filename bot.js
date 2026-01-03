@@ -28,10 +28,13 @@ const RANK_NAMES = {
 
 const activeProcessing = new Set();
 
+// 名前とタグを安全にURLエンコードしてMMRを取得
 async function getPlayerMMR(name, tag, region = 'ap') {
     try {
+        const encodedName = encodeURIComponent(name);
+        const encodedTag = encodeURIComponent(tag);
         const response = await axios.get(
-            `https://api.henrikdev.xyz/valorant/v2/mmr/${region}/${name}/${tag}`,
+            `https://api.henrikdev.xyz/valorant/v2/mmr/${region}/${encodedName}/${encodedTag}`,
             { headers: { 'Authorization': HENRIK_API_KEY } }
         );
         return response.data;
@@ -41,10 +44,13 @@ async function getPlayerMMR(name, tag, region = 'ap') {
     }
 }
 
+// コンペティティブのみをフィルタリングして取得
 async function getMatchHistory(name, tag, region = 'ap') {
     try {
+        const encodedName = encodeURIComponent(name);
+        const encodedTag = encodeURIComponent(tag);
         const response = await axios.get(
-            `https://api.henrikdev.xyz/valorant/v3/matches/${region}/${name}/${tag}`,
+            `https://api.henrikdev.xyz/valorant/v3/matches/${region}/${encodedName}/${encodedTag}?filter=competitive`,
             { headers: { 'Authorization': HENRIK_API_KEY } }
         );
         return response.data;
@@ -54,28 +60,43 @@ async function getMatchHistory(name, tag, region = 'ap') {
     }
 }
 
+// 統計情報の計算ロジック
 function calculateStats(matches, targetPuuid) {
-    if (!matches || matches.length === 0) return null;
-    let totalKills = 0, totalDeaths = 0, totalHS = 0, totalShots = 0, wins = 0;
+    if (!matches || !Array.isArray(matches) || matches.length === 0 || !targetPuuid) return null;
+
+    let totalKills = 0, totalDeaths = 0, totalHS = 0, totalAllShots = 0, wins = 0;
     const agentCount = {};
     const last5Matches = [];
 
-    matches.slice(0, 5).forEach(match => {
+    // モードがCompetitiveであることを厳格に確認し、最大5試合を対象とする
+    const competitiveMatches = matches.filter(m => m.metadata.mode === 'Competitive').slice(0, 5);
+
+    competitiveMatches.forEach(match => {
+        // 入力されたPUUIDと完全に一致するプレイヤーのみを特定
         const playerStats = match.players.all_players.find(p => p.puuid === targetPuuid);
         if (!playerStats) return;
 
-        totalKills += playerStats.stats.kills;
-        totalDeaths += playerStats.stats.deaths;
-        totalHS += playerStats.stats.headshots;
-        totalShots += playerStats.stats.headshots + playerStats.stats.bodyshots + playerStats.stats.legshots;
-
+        // 勝敗判定: 本人の所属チームが勝ったかどうか
         const playerTeam = playerStats.team.toLowerCase();
-        const won = (playerTeam === 'red' && match.teams.red.has_won) || (playerTeam === 'blue' && match.teams.blue.has_won);
+        const won = (match.teams && match.teams[playerTeam]) ? match.teams[playerTeam].has_won : false;
         if (won) wins++;
 
+        // HS率計算用の命中数 (頭 + 胴 + 脚 = 体全体)
+        const h = playerStats.stats.headshots;
+        const b = playerStats.stats.bodyshots;
+        const l = playerStats.stats.legshots;
+        const shotsInThisMatch = h + b + l;
+
+        // 統計情報の累積
+        totalKills += playerStats.stats.kills;
+        totalDeaths += playerStats.stats.deaths;
+        totalHS += h;
+        totalAllShots += shotsInThisMatch;
+
         agentCount[playerStats.character] = (agentCount[playerStats.character] || 0) + 1;
-        const totalShotsInMatch = playerStats.stats.headshots + playerStats.stats.bodyshots + playerStats.stats.legshots;
-        const hsRate = totalShotsInMatch > 0 ? (playerStats.stats.headshots / totalShotsInMatch * 100) : 0;
+
+        // 個別試合のHS率: 頭 / (頭 + 胴 + 脚)
+        const hsRate = shotsInThisMatch > 0 ? (h / shotsInThisMatch * 100) : 0;
 
         last5Matches.push({
             map: match.metadata.map,
@@ -85,27 +106,30 @@ function calculateStats(matches, targetPuuid) {
             assists: playerStats.stats.assists,
             hsRate: hsRate,
             won: won,
-            score: `${match.teams.blue.rounds_won} - ${match.teams.red.rounds_won}`
+            score: match.teams ? `${match.teams.blue.rounds_won} - ${match.teams.red.rounds_won}` : 'N/A'
         });
     });
 
     if (last5Matches.length === 0) return null;
+
     const mostUsedAgent = Object.entries(agentCount).sort((a, b) => b[1] - a[1])[0];
+    
     return {
         avgKD: totalDeaths > 0 ? (totalKills / totalDeaths).toFixed(2) : totalKills.toFixed(2),
-        avgHS: totalShots > 0 ? ((totalHS / totalShots) * 100).toFixed(1) : '0.0',
+        avgHS: totalAllShots > 0 ? ((totalHS / totalAllShots) * 100).toFixed(1) : '0.0',
         winRate: ((wins / last5Matches.length) * 100).toFixed(0),
         mostUsedAgent: mostUsedAgent ? mostUsedAgent[0] : 'N/A',
         last5Matches
     };
 }
 
+// 埋め込みメッセージ作成
 function createStatsEmbed(name, tag, mmrData, stats) {
     const embed = new EmbedBuilder()
         .setColor('#FF4655')
-        .setAuthor({ name: 'VALORANT Tracker Search Results', iconURL: 'https://red-dot-geek.com/wp-content/uploads/2021/04/valorant-logo-600x600.png' })
+        .setAuthor({ name: 'VALORANT Competitive Report', iconURL: 'https://red-dot-geek.com/wp-content/uploads/2021/04/valorant-logo-600x600.png' })
         .setTitle(`🔎 ${name}#${tag} の戦績レポート`)
-        .setDescription(`以下の情報は直近の試合データに基づいています。`)
+        .setDescription(`以下の情報は直近の**コンペティティブマッチ**に基づいています。`)
         .setThumbnail(mmrData?.data?.current_data?.images?.small || null)
         .setTimestamp()
         .setFooter({ text: 'Powered by Henrik-3 API' });
@@ -118,33 +142,30 @@ function createStatsEmbed(name, tag, mmrData, stats) {
     const current = mmrData.data.current_data;
     const highest = mmrData.data.highest_rank;
 
-    // 基本情報セクション
     embed.addFields(
         { name: '👤 現在のランク', value: `**${RANK_NAMES[current.currenttierpatched] || current.currenttierpatched}**\n(${current.ranking_in_tier} RR)`, inline: true },
         { name: '📈 最高ランク', value: `**${RANK_NAMES[highest.patched_tier] || highest.patched_tier}**`, inline: true },
-        { name: '\u200B', value: '\u200B', inline: true } // 空白埋め
+        { name: '\u200B', value: '\u200B', inline: true }
     );
 
     if (stats) {
-        // パフォーマンスセクション
         embed.addFields(
             { name: '🎯 平均K/D', value: `\`${stats.avgKD}\``, inline: true },
-            { name: '💀 平均HS率', value: `\`${stats.avgHS}%\``, inline: true },
+            { name: '💀 平均HS率 (頭/体全体)', value: `\`${stats.avgHS}%\``, inline: true },
             { name: '🔥 勝率 (直近5戦)', value: `\`${stats.winRate}%\``, inline: true }
         );
 
-        // 直近5試合のリストを整形
         let matchSummary = '';
         stats.last5Matches.forEach((m) => {
             const status = m.won ? '🟦 **WIN**' : '🟥 **LOSS**';
             const kd = m.deaths > 0 ? (m.kills / m.deaths).toFixed(2) : m.kills.toFixed(2);
             matchSummary += `${status} | ${m.map} | ${m.agent}\n`;
-            matchSummary += `└ \`${m.kills}/${m.deaths}/${m.assists}\` (KD:${kd}) HS:\`${m.hsRate.toFixed(0)}%\`\n\n`;
+            matchSummary += `└ \`${m.kills}/${m.deaths}/${m.assists}\` (KD:${kd}) HS:\`${m.hsRate.toFixed(1)}%\`\n\n`;
         });
 
         embed.addFields(
             { name: '🎮 最頻使用エージェント', value: stats.mostUsedAgent, inline: false },
-            { name: '📅 直近5試合の履歴', value: matchSummary || 'データなし', inline: false }
+            { name: '📅 直近のコンペティティブ履歴', value: matchSummary || 'データなし', inline: false }
         );
     }
 
@@ -164,7 +185,7 @@ client.on('messageCreate', async message => {
     const args = message.content.split(' ');
     if (args.length < 2) {
         activeProcessing.delete(message.id);
-        return message.reply('💡 **使い方**: `!stats 名前#タグ` (例: `!stats TenZ#0915`)');
+        return message.reply('💡 **使い方**: `!stats 名前#タグ`');
     }
 
     const playerIdParts = args[1].split('#');
@@ -174,12 +195,12 @@ client.on('messageCreate', async message => {
     }
 
     const [name, tag] = playerIdParts;
-    const loadingMsg = await message.reply('📡 データを照会中...');
+    const loadingMsg = await message.reply('📡 コンペティティブデータを照会中...');
 
     try {
         const mmrData = await getPlayerMMR(name, tag);
         if (!mmrData || !mmrData.data) {
-            await loadingMsg.edit('❌ プレイヤーが見つかりませんでした。非公開アカウントか、名前/タグが間違っています。');
+            await loadingMsg.edit('❌ プレイヤーが見つかりませんでした。');
         } else {
             const puuid = mmrData.data.puuid;
             const matchData = await getMatchHistory(name, tag);
@@ -189,7 +210,7 @@ client.on('messageCreate', async message => {
         }
     } catch (error) {
         console.error(error);
-        await loadingMsg.edit('❌ データの取得中にエラーが発生しました。時間を置いて再度お試しください。');
+        await loadingMsg.edit('❌ データの取得中にエラーが発生しました。');
     } finally {
         activeProcessing.delete(message.id);
     }

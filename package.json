@@ -1,7 +1,7 @@
 {
   "name": "valorant-discord-bot",
   "version": "1.0.0",
-  "description": "Valorant stats tracker bot for Discord",
+  "description": "Strict Competitive Valorant stats tracker for Discord",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
